@@ -1,0 +1,102 @@
+# Bloque común de los backends (mismo healthcheck que en lab-proxy)
+x-backend: &backend
+  build: ./backend
+  restart: unless-stopped
+  networks: [proyecto-net]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+    interval: 5s
+    timeout: 3s
+    retries: 5
+    start_period: 3s
+
+services:
+  # ---------- Backends ----------
+  app1:
+    <<: *backend
+    environment:
+      SERVER_NAME: "server 1"
+
+  app2:
+    <<: *backend
+    environment:
+      SERVER_NAME: "server 2"
+
+  app3:
+    <<: *backend
+    environment:
+      SERVER_NAME: "server 3"
+
+  # ---------- Proxy inverso ----------
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      app1: { condition: service_healthy }
+      app2: { condition: service_healthy }
+      app3: { condition: service_healthy }
+    networks: [proyecto-net]
+
+  # ---------- Monitoreo ----------
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.4.2
+    restart: unless-stopped
+    command: ["--nginx.scrape-uri=http://nginx:8088/stub_status"]
+    depends_on: [nginx]
+    networks: [proyecto-net]
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:0.56.2
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/kmsg
+    ports:
+      - "${CADVISOR_PORT:-8081}:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks: [proyecto-net]
+
+  prometheus:
+    image: prom/prometheus:v3.13.5
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on: [app1, app2, app3, nginx-exporter, cadvisor]
+    networks: [proyecto-net]
+
+  grafana:
+    image: grafana/grafana:12.4.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    networks: [proyecto-net]
+
+# Red personalizada: los contenedores se encuentran por nombre (app1, nginx...)
+networks:
+  proyecto-net:
+    driver: bridge
+
+# Persistencia de Prometheus y Grafana
+volumes:
+  prometheus-data:
+  grafana-data:
